@@ -1,17 +1,17 @@
 import re
 import pandas as pd
+import os
 from openai import OpenAI
 import requests
 from bs4 import BeautifulSoup
-import os
 import difflib
-import re
 from validate_email_address import validate_email
 
 # NOTE: EXCEL_PATH must be defined here if it is not imported from app.py
 EXCEL_PATH = r"F:\TKSR PRODUCTION\job1\a1.xlsx"
 
-groq_api_key =" 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"
+groq_api_key = "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".strip()
+
 # --- LLM Client Setup ---
 client = OpenAI(
     api_key=groq_api_key,
@@ -24,8 +24,7 @@ client = OpenAI(
 
 def _find_in_excel(hr_name: str = "", company_name: str = "") -> str | None:
     """
-    Directly checks the Excel file for a previously saved recruiter email based on
-    Company Name or Recruiter Name (Tool 1 in Agent logic).
+    Directly checks the Excel file for a previously saved recruiter email.
     """
     try:
         df = pd.read_excel(EXCEL_PATH)
@@ -70,50 +69,81 @@ def _find_in_excel(hr_name: str = "", company_name: str = "") -> str | None:
 # =================================================================
 
 def _infer_company_domain(company_name: str) -> str | None:
-    """Uses Groq to guess the official domain (Part of Tool 2)."""
+    """
+    Uses Groq to guess the official domain (Tool 2, Fallback) with strict prompting.
+    This logic has been updated to use a low temperature and strict prompt.
+    """
     try:
         if not company_name or company_name.lower() in ["nan", "none", "unknowncompany"]:
             return None
+        if not client.api_key:
+             # Ensure the API key is set in your environment
+             print("[Groq] API key not loaded, skipping LLM inference.")
+             return None
             
-        prompt = f"Find the most likely official domain name of the company '{company_name}'. Only return the domain."
+        # 💡 NEW: Strict prompt and low temperature for deterministic output
+        prompt = f"What is the official, current, and exact website domain name (only the domain, no https/www, no slashes, no dots except before the TLD) for the company '{company_name}'. Only return the domain name."
+        
         response = client.chat.completions.create(
             model="llama-3.1-8b-instant",
             messages=[{"role": "user", "content": prompt}],
-            max_tokens=20,
-            temperature=0.2
+            max_tokens=30, 
+            temperature=0.1 # Lowered temperature for deterministic output
         )
         domain = response.choices[0].message.content.strip()
-        domain = re.sub(r"^https?://", "", domain)
-        domain = domain.split("/")[0]
+        
+        # Clean and validate the output to ensure it's a domain
+        domain = re.sub(r"^https?://|/$", "", domain) # Remove common prefixes/suffixes
+        domain = domain.split("/")[0] # Ensure no paths
+        
+        # Simple domain validation to reject non-domains like "I cannot provide..."
+        if "." not in domain or len(domain.split(".")) < 2:
+             print(f"[Groq] LLM output rejected as non-domain: {domain}")
+             return None
+             
+        print(f"[Groq] LLM inferred domain: {domain}")
         return domain
+        
     except Exception as e:
         print(f"[Groq] Failed to infer domain for {company_name}: {e}")
         return None
 
 
 def _scrape_domain_fallback(company_name: str) -> str | None:
-    """Scrapes Google search results to extract a domain (Fallback for Tool 2)."""
+    """
+    Scrapes Google search results to extract a domain (Tool 2, Primary Check).
+    NOTE: This is prone to Google blocking (HTTP 403/429 errors).
+    """
     try:
-        query = f"{company_name} official site"
+        query = f"{company_name} official website"
         url = f"https://www.google.com/search?q={query}"
-        headers = {"User-Agent": "Mozilla/5.0"}
+        headers = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36"}
+        
+        # Using standard Python requests for web scraping
         res = requests.get(url, headers=headers, timeout=10)
-
+        
         if res.status_code != 200:
+            print(f"[Scraper] Failed to fetch search results (Status: {res.status_code})")
             return None
 
         soup = BeautifulSoup(res.text, "html.parser")
-        links = [a["href"] for a in soup.select("a[href]") if "http" in a["href"]]
+        
+        # Extract links from the search results
+        links = [h3.parent['href'] for h3 in soup.select('h3') if h3.parent.has_attr('href')]
 
         for link in links:
-            match = re.search(r"https?://([a-zA-Z0-9.-]+)", link)
+            # Extract the domain from the URL
+            match = re.search(r"https?://(?:www\.)?([a-zA-Z0-9.-]+)", link)
             if match:
-                domain = match.group(1)
-                if not domain.startswith(company_name.lower()):
+                domain = match.group(1).lower()
+                
+                # General Fallback: Return the first non-generic domain.
+                if "linkedin" not in domain and "google" not in domain and "wikipedia" not in domain:
+                    print(f"[Scraper] Found primary domain: {domain}")
                     return domain
         return None
     except Exception as e:
-        print(f"[Scraper] Fallback failed for {company_name}: {e}")
+        print(f"[Scraper] Domain check failed for {company_name}: {e}")
         return None
 
 
@@ -128,11 +158,12 @@ def _generate_email_patterns(hr_name: str, domain: str) -> list[str]:
     last = parts[-1] if len(parts) > 1 else ""
 
     candidates = [
-        f"{first}.{last}@{domain}", # john.doe@domain.com
-        f"{first}@{domain}",        # john@domain.com
-        f"{first}{last}@{domain}",  # johndoe@domain.com
-        f"{first[0]}{last}@{domain}",# jdoe@domain.com
-        f"{last}@{domain}",          # doe@domain.com
+        f"{first}.{last}@{domain}",       # john.doe@domain.com
+        f"{first}@{domain}",              # john@domain.com
+        f"{first}{last}@{domain}",        # johndoe@domain.com
+        f"{first[0]}{last}@{domain}",     # jdoe@domain.com
+        f"{last}@{domain}",               # doe@domain.com
+        f"{first[0]}{last[0]}@{domain}",  # j.d@domain.com
     ]
     # Add generic HR emails
     candidates.extend([f"hr@{domain}", f"careers@{domain}", f"recruiting@{domain}"])
@@ -148,56 +179,50 @@ def scrape_recruiter_email(job_description: str) -> str | None:
     return None
 
 # =================================================================
-# AGENTIC TOOL 3: EMAIL VERIFICATION (CRITICAL FOR 70%+)
+# AGENTIC TOOL 3: EMAIL VERIFICATION
 # =================================================================
 
 def _verify_email_candidates(candidates: list[str]) -> str | None:
     """
-    Verifies email candidates using regex + SMTP (MX lookup).
-    Returns the first valid & deliverable email.
+    Verifies email candidates using regex + MX lookup.
     """
     print(f"[Verifier] Attempting to verify {len(candidates)} candidates...")
 
     for email in candidates:
-        # Step 1: Basic regex check
         if not re.match(r"[^@]+@[^@]+\.[^@]+", email):
-            continue  
+            continue 
 
-        # Step 2: Validate email with MX + SMTP check
+        # Using 'email=email' to resolve previous TypeError
         try:
             is_valid = validate_email(
-                email_address=email, 
+                email=email, 
                 check_format=True, 
                 check_blacklist=True, 
                 check_dns=True,       # MX record
                 dns_timeout=10, 
-                check_smtp=True,      # Real mail server check
-                smtp_timeout=10, 
-                smtp_skip_tls=False, 
-                smtp_debug=False
+                check_smtp=False,     # Set SMTP check to False for speed/reliability
             )
         except Exception as e:
             print(f"[Verifier] Error checking {email}: {e}")
             continue
 
-        if is_valid:
+        if is_valid is True or is_valid == 'catchall':
             print(f"[Verifier] ✅ Verified email: {email}")
             return email
         else:
-            print(f"[Verifier] ❌ Invalid: {email}")
+            print(f"[Verifier] ❌ Invalid or Undeliverable: {email}")
+            
+    # Fallback logic: prioritize professional patterns, then generic HR, then any valid-looking email.
     for email in candidates:
-        # Simple regex check for professional name pattern
-        if re.match(r"^[a-z]+[._][a-z]+@[a-z0-9.-]+\.[a-z]{2,}$", email):
+        if re.match(r"^[a-z]+[._]?[a-z]+@[a-z0-9.-]+\.[a-z]{2,}$", email):
             print(f"[Verifier] Selected professional pattern: {email}")
             return email
             
-    # Priority 2: Check for generic HR/Recruiting addresses
     for email in candidates:
         if email.startswith(("hr@", "careers@", "recruiting@")):
             print(f"[Verifier] Selected generic pattern: {email}")
             return email
             
-    # Priority 3: Fallback (any valid-looking email)
     for email in candidates:
         if re.match(r"[^@]+@[^@]+\.[^@]+", email):
             print(f"[Verifier] Selected fallback email: {email}")
@@ -207,44 +232,52 @@ def _verify_email_candidates(candidates: list[str]) -> str | None:
     return None
 
 # =================================================================
-# MAIN AGENTIC-STYLE FUNCTION
+# MAIN AGENTIC-STYLE FUNCTION (Scraper First, then LLM)
 # =================================================================
 
 def get_recruiter_email(hr_name: str, company_name: str, job_description: str) -> str | None:
     """
-    Main function that simulates the Agentic reasoning process:
-    1. Check Excel (Highest confidence)
-    2. Check JD (High confidence)
-    3. Generate Patterns (Medium confidence)
-    4. Verify & Select (Highest confidence candidate)
+    Main function with the requested logic:
+    1. Check Excel
+    2. Check JD
+    3. Scrape Domain (Primary)
+    4. LLM Guess Domain (Fallback - now with strict prompt/low temp)
+    5. Generate & Verify
     """
     
-    # 1. Step 1: Check Excel (Tool 1)
+    # 1. Step 1: Check Excel (Highest confidence)
     email = _find_in_excel(hr_name, company_name)
     if email:
         print(f"[Agent] Found email in Excel: {email}")
         return email
 
-    # 2. Step 2: Look in job description (Tool 2 variant)
+    # 2. Step 2: Look in job description (High confidence)
     email = scrape_recruiter_email(job_description)
     if email:
         print(f"[Agent] Found email in JD: {email}")
         return email
         
-    # 3. Step 3: Generate Pattern Candidates (Tool 2)
-    domain = _infer_company_domain(company_name) or _scrape_domain_fallback(company_name)
+    # 3. Step 3: Scrape Domain (Primary)
+    print(f"[Agent] Attempting domain scrape for {company_name}...")
+    final_domain = _scrape_domain_fallback(company_name)
     
-    if not domain:
-        print(f"[Agent] Failed to infer company domain for {company_name}")
-        return None # Cannot proceed without a domain
-        
-    candidates = _generate_email_patterns(hr_name, domain)
+    if not final_domain:
+        # 4. Step 4: LLM Guess Domain (Fallback)
+        print(f"[Agent] Scraper failed. Falling back to LLM inference (strict mode)...")
+        final_domain = _infer_company_domain(company_name)
+    
+    if not final_domain:
+        print(f"[Agent] Failed to find a valid company domain for {company_name}")
+        return None 
+    
+    print(f"[Agent] Using final domain: {final_domain}")
+    
+    candidates = _generate_email_patterns(hr_name, final_domain)
     
     if not candidates:
         return None
 
-    # 4. Step 4: Verify and Select (Tool 3)
-    # The agent uses the verification tool to filter the generated list.
+    # 5. Step 5: Verify and Select (Tool 3)
     best_email = _verify_email_candidates(candidates)
     
     if best_email:
