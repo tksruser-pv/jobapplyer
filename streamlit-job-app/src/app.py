@@ -2,6 +2,8 @@ import streamlit as st
 import pandas as pd
 import os
 from datetime import datetime
+import configparser # New import for config loading
+
 # Assuming these imports are correct based on your file structure
 from components.calendar_dropdown import calendar_dropdown 
 from utils.resume_editor import edit_resume 
@@ -12,8 +14,35 @@ from email.mime.text import MIMEText
 from email.mime.multipart import MIMEMultipart
 from email.mime.application import MIMEApplication
 
-EXCEL_PATH = r"F:\TKSR PRODUCTION\job1\a1.xlsx"
+# =================================================================
+# CONFIGURATION LOADING
+# =================================================================
 
+def _load_main_config():
+    """Reads the EXCEL_PATH from config.ini."""
+    config = configparser.ConfigParser()
+    config_paths = ['config.ini'] 
+    
+    # Define a default path if config is not found or key is missing
+    default_path = r"F:\TKSR PRODUCTION\job1\a1.xlsx" 
+    
+    if not config.read(config_paths):
+        print("WARNING: config.ini not found. Using default EXCEL_PATH.")
+        return default_path
+
+    try:
+        # Load EXCEL_PATH from the [PATHS] section
+        return config['PATHS'].get('EXCEL_PATH', default_path)
+    except KeyError:
+        print("WARNING: [PATHS] section or EXCEL_PATH key missing in config.ini. Using default EXCEL_PATH.")
+        return default_path
+
+# Load the Excel path from the configuration file
+EXCEL_PATH = _load_main_config()
+
+# =================================================================
+# UTILITY FUNCTIONS
+# =================================================================
 
 def send_email(to_email, subject, body, from_email, from_password, attachment_path=None):
     """Handles SMTP connection and sends the email with attachment."""
@@ -39,40 +68,36 @@ def send_email(to_email, subject, body, from_email, from_password, attachment_pa
     server.quit()
 
 
-# app.py (Replace existing find_recruiter_email function)
-
 def find_recruiter_email(job_details, hr_name="", company_name=""):
     """
-    Priority check for recruiter email:
-    1. Direct column lookup from the current job_details row (CRITICAL FIX)
-    2. Fallback to Groq/Scraping logic
+    Priority check for recruiter email, using the standardized column name 'recruiter_email'.
+
+    1. Direct column lookup from the current job_details row.
+    2. Fallback to Groq/Scraping logic (get_recruiter_email).
     """
-    # 1. Direct recruiter email lookup
-    # Check for the known column names: 'recruiter email' (lowercase, space) 
-    # and 'Recruiter Email' (if present from other sources)
-    for col in ["recruiter email", "Recruiter Email"]: 
-        email = job_details.get(col)
-        # Check if the value is not NaN and contains '@'
-        if pd.notna(email) and "@" in str(email):
-             return str(email).strip()
-            
-    # NOTE: The job_details row only contains the email if it was in the Excel file.
-    # If not found, fall back to the advanced search.
+    # 1. Direct recruiter email lookup (using the standardized key 'recruiter_email')
+    email = job_details.get("recruiter_email")
     
+    # Check if the value is not NaN and contains '@'
+    if pd.notna(email) and "@" in str(email):
+        return str(email).strip()
+            
     # 2. Fallback: use Groq scraper logic
-    job_description = job_details.get("job description", "")
+    # Note: hr_name and company_name are already passed in, and we look for 
+    # the standardized 'job_description' key in the row data.
+    job_description = job_details.get("job_description", "")
     return get_recruiter_email(hr_name, company_name, job_description)
 
-# Ensure the main loop in app.py uses the exact column names:
-# company_name = job_details.get("Company Name", "UnknownCompany") 
-# recruiter_name = job_details.get("recruiter name", "")
-
+# =================================================================
+# MAIN STREAMLIT APPLICATION
+# =================================================================
 
 def main():
     st.title("📩 Job Application Portal")
 
     # User Inputs
-    selected_date = calendar_dropdown()
+    # Note: calendar_dropdown is assumed to return a datetime.date object
+    selected_date = calendar_dropdown() 
     user_resume = st.file_uploader("Upload your resume (PDF or DOCX)", type=["pdf", "docx"])
     user_name = st.text_input("Your Name")
     user_email = st.text_input("Your Gmail Address")
@@ -80,15 +105,19 @@ def main():
 
     # Load and clean job details
     try:
+        if not os.path.exists(EXCEL_PATH):
+            st.error(f"Excel file not found at configured path: {EXCEL_PATH}")
+            return
+
         job_details_df = pd.read_excel(EXCEL_PATH)
         
         # 1. CRITICAL CLEANUP STEP: Standardize all column names (lowercase + underscores)
         job_details_df.columns = job_details_df.columns.str.strip().str.lower().str.replace(" ", "_")
 
         # --- DATE HANDLING (Robust and Correct) ---
-        # 1. Convert the 'date' column to datetime, explicitly setting dayfirst=True 
+        # 1. Convert the 'date' column to datetime
         job_details_df['date_dt'] = pd.to_datetime(
-            job_details_df["date"], 
+            job_details_df.get("date"), # Use .get to handle missing 'date' column safely
             errors="coerce", 
             dayfirst=True 
         )
@@ -98,38 +127,30 @@ def main():
         
         # 3. Standardize the Streamlit selected date to the same string format.
         if hasattr(selected_date, "strftime"):
-             selected_date_str = selected_date.strftime('%Y-%m-%d')
+            selected_date_str = selected_date.strftime('%Y-%m-%d')
         else:
-             st.error("Invalid date object received from calendar dropdown.")
-             return
+            # Fallback if dropdown returns an unexpected object type
+            st.error("Invalid date object received from calendar dropdown.")
+            return
         
         # Filter jobs for selected date using the standardized string column
         jobs_for_date = job_details_df[job_details_df["date_str"] == selected_date_str].copy()
         
     except Exception as e:
-        st.error(f"Failed to read job details Excel or process dates: {e}")
+        st.error(f"Failed to read job details Excel or process data: {e}")
         return
     
     st.subheader("📊 Job Data for Selected Date")
-    # Display jobs_for_date after filtering
-    st.dataframe(jobs_for_date[['company_name', 'recruiter_name', 'recruiter_email', 'job_description']].head()) 
-
-    st.write("Current DataFrame columns (lowercase_underscore):", job_details_df.columns.tolist())
+    # Display relevant columns
+    display_cols = ['company_name', 'recruiter_name', 'recruiter_email', 'job_description']
+    # Filter columns to only show those that exist
+    st.dataframe(jobs_for_date[[col for col in display_cols if col in jobs_for_date.columns]].head()) 
 
     # Submit Application
     if st.button("Submit Application"):
-        # Validate inputs
-        if not selected_date:
-            st.error("Please select a date before submitting.")
-            return
-        if user_resume is None:
-            st.error("Please upload your resume before submitting.")
-            return
-        if not user_name or not user_email:
-            st.error("Please enter your name and email.")
-            return
-        if not from_password:
-            st.error("Please enter your Gmail App Password.")
+        # ... (Input Validations remain the same) ...
+        if not selected_date or user_resume is None or not user_name or not user_email or not from_password:
+            st.error("Please fill in all required fields and upload your resume before submitting.")
             return
         if jobs_for_date.empty:
             st.warning(f"No companies available for the selected date ({selected_date_str}). Please choose another date.")
@@ -137,6 +158,7 @@ def main():
 
         # Save uploaded resume
         os.makedirs("temp_resume", exist_ok=True)
+        # Use a unique temporary name for the uploaded file
         resume_save_path = os.path.join(
             "temp_resume", f"{datetime.now().strftime('%Y%m%d_%H%M%S')}_{user_resume.name}"
         )
@@ -147,45 +169,59 @@ def main():
         fail_count = 0
         debug_results = []
 
-        for _, job_details in jobs_for_date.iterrows():
-            # --- CRITICAL FIX: USE CLEANED COLUMN NAMES ---
-            # Use 'company_name', 'recruiter_name', 'job_description'
-            job_description = job_details.get("job_description", "")
-            company_name = job_details.get("company_name", "UnknownCompany") 
-            recruiter_name = job_details.get("recruiter_name", "") 
-            # ---------------------------------------------
-
-            print(f"DEBUG: Processing Company: {company_name}") # Check the extracted name
-
-            # Create job-specific edited resume
-            output_path = f"edited_resume_{company_name}_{datetime.now().strftime('%H%M%S')}.pdf"
-            edited_resume_result = edit_resume(resume_save_path, job_description, output_path)
-            edited_resume_path = edited_resume_result[0] if isinstance(edited_resume_result, tuple) else edited_resume_result
-
-            # Note: find_recruiter_email must be updated in app.py to only look for
-            # 'recruiter_email' since the column names were standardized.
-            recruiter_email = find_recruiter_email(job_details, recruiter_name, company_name)
+        # Start processing jobs
+        for _, job_details_row in jobs_for_date.iterrows():
             
-            # --- Robust check for 'nan' and empty string before sending ---
-            if not recruiter_email or str(recruiter_email).lower() in ["none", "nan", ""]:
-                st.error(f"No valid recruiter email found for {company_name}, skipping...")
+            # --- EXTRACTING DATA USING STANDARDIZED KEYS ---
+            job_description = job_details_row.get("job_description", "")
+            company_name = job_details_row.get("company_name", "UnknownCompany") 
+            recruiter_name = job_details_row.get("recruiter_name", "") 
+            
+            if not job_description:
+                 st.warning(f"Skipping {company_name}: Job description is missing.")
+                 fail_count += 1
+                 continue
+
+            # 1. Create job-specific edited resume (Output is Markdown, as per tool update)
+            # The output path should be .md since the LLM editor tool outputs markdown
+            output_path = os.path.join("temp_resume", f"edited_resume_{company_name}.md")
+            
+            # The edit_resume function now returns the path string directly
+            try:
+                edited_resume_path = edit_resume(resume_save_path, job_description, output_path)
+            except Exception as e:
+                st.error(f"LLM Resume Edit Failed for {company_name}: {e}")
                 fail_count += 1
                 continue
+                
+            # 2. Find Recruiter Email (Uses Direct lookup then Groq Scraper)
+            recruiter_email = find_recruiter_email(job_details_row, recruiter_name, company_name)
             
-            # Fix common typo (optional, but good)
+            if not recruiter_email or str(recruiter_email).lower() in ["none", "nan", ""]:
+                st.error(f"No valid recruiter email found for {company_name}, skipping email attempt...")
+                fail_count += 1
+                debug_results.append({
+                    "Company": company_name,
+                    "Recruiter": recruiter_name,
+                    "Resolved Email": "❌ Not Found"
+                })
+                continue
+            
+            # Fix common typo
             recruiter_email = recruiter_email.replace("@gamil.com", "@gmail.com") 
 
             debug_results.append({
                 "Company": company_name,
                 "Recruiter": recruiter_name,
-                "Resolved Email": recruiter_email or "❌ Not Found"
+                "Resolved Email": recruiter_email
             })
 
-            # --- START ROBUST EMAIL BLOCK ---
+            # --- SEND EMAIL BLOCK ---
             try:
                 # Generate email body and subject (returns a tuple: body, subject)
+                # Note: job_details_row (Pandas Series) is passed here
                 email_content, subject = generate_email(
-                    job_details, edited_resume_path, recruiter_name, user_name, user_email
+                    job_details_row.to_dict(), edited_resume_path, recruiter_name, user_name, user_email
                 )
 
                 # Send email
@@ -195,16 +231,14 @@ def main():
                     email_content,
                     user_email,
                     from_password,
-                    edited_resume_path, # This is the 6th argument (attachment_path)
+                    edited_resume_path, # Attachment: the new markdown resume
                 )
                 st.success(f"✅ Successfully sent application to {company_name} at {recruiter_email}")
                 success_count += 1
                 
             except Exception as e:
-                # Catch failures in email generation or sending
-                st.error(f"❌ Failed to send email to {recruiter_email}: {e}")
+                st.error(f"❌ Failed to send email to {recruiter_email} ({company_name}): {e}")
                 fail_count += 1
-            # --- END ROBUST EMAIL BLOCK ---
 
         # Show debug table
         st.subheader("📊 Recruiter Email Resolution")
@@ -215,7 +249,6 @@ def main():
             st.success(f"✅ Applications sent to {success_count} companies for {selected_date_str}!")
         if fail_count > 0:
             st.warning(f"⚠️ Failed to send applications to {fail_count} companies.")
-
 
 if __name__ == "__main__":
     main()

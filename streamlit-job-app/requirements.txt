@@ -1,9 +1,21 @@
+# requirements.txt
+
+# --- UI and Core Utilities ---
 streamlit
 pandas
-openpyxl
-python-docx
-PyPDF2
+openpyxl         
+dotenv            
+
+# --- Document Parsing ---
+python-docx       
+PyPDF2            
+
+# --- Web Scraping and HTTP ---
 requests
-dotenv
-groq
-beautifulsoup4
+beautifulsoup4    
+
+# --- LLM and Agentic Tools ---
+openai            
+
+# --- CRITICAL: Email Verification ---
+validate-email-address  
