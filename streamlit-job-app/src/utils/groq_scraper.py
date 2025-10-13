@@ -21,6 +21,7 @@ def _load_config():
         os.path.join(os.getcwd(), 'config.ini'),
         os.path.join(os.getcwd(), 'config', 'config.ini'),
     ]
+    
     config_path = None
     for path in possible_paths:
         if os.path.exists(path):
