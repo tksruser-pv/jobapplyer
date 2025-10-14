@@ -1,9 +1,8 @@
-import streamlit as st
 import pandas as pd
+import configparser
 import os
+import streamlit as st
 from datetime import datetime
-import configparser # New import for config loading
-
 # Assuming these imports are correct based on your file structure
 from components.calendar_dropdown import calendar_dropdown 
 from utils.resume_editor import edit_resume 
@@ -96,7 +95,6 @@ def main():
     st.title("📩 Job Application Portal")
 
     # User Inputs
-    # Note: calendar_dropdown is assumed to return a datetime.date object
     selected_date = calendar_dropdown() 
     user_resume = st.file_uploader("Upload your resume (PDF or DOCX)", type=["pdf", "docx"])
     user_name = st.text_input("Your Name")
@@ -109,23 +107,38 @@ def main():
             st.error(f"Excel file not found at configured path: {EXCEL_PATH}")
             return
 
+        # --- EXCEL LOADING AND CLEANUP (CRITICAL SECTION) ---
         job_details_df = pd.read_excel(EXCEL_PATH)
         
-        # 1. CRITICAL CLEANUP STEP: Standardize all column names (lowercase + underscores)
+        # 1. Standardize all column names (lowercase + underscores)
         job_details_df.columns = job_details_df.columns.str.strip().str.lower().str.replace(" ", "_")
 
-        # --- DATE HANDLING (Robust and Correct) ---
-        # 1. Convert the 'date' column to datetime
-        job_details_df['date_dt'] = pd.to_datetime(
-            job_details_df.get("date"), # Use .get to handle missing 'date' column safely
-            errors="coerce", 
-            dayfirst=True 
-        )
+        # 2. CRITICAL FIX: Convert the 'date' column to datetime objects
         
-        # 2. Convert to a standardized string format for reliable comparison (YYYY-MM-DD)
+        # Identify the date column name after standardization (to lowercase/snake_case)
+        # Check for common names like 'date', 'application_date', 'job_date'
+        date_col_name = None
+        for col in ['date', 'application_date', 'job_date', 'posting_date']:
+            if col in job_details_df.columns:
+                date_col_name = col
+                break
+
+        if date_col_name:
+             # Convert the found column to datetime, resolving the ".dt accessor" error
+             job_details_df['date_dt'] = pd.to_datetime(
+                job_details_df[date_col_name],
+                errors="coerce", 
+                dayfirst=True 
+            )
+        else:
+            st.warning("Excel file does not contain a 'date' column (e.g., 'Date', 'Application Date') for filtering.")
+            return # Stop if the necessary column is missing
+        
+        # 3. Convert to a standardized string format for reliable comparison (YYYY-MM-DD)
+        # We use the new 'date_dt' column created above
         job_details_df['date_str'] = job_details_df['date_dt'].dt.strftime('%Y-%m-%d')
         
-        # 3. Standardize the Streamlit selected date to the same string format.
+        # 4. Standardize the Streamlit selected date to the same string format.
         if hasattr(selected_date, "strftime"):
             selected_date_str = selected_date.strftime('%Y-%m-%d')
         else:
@@ -137,6 +150,7 @@ def main():
         jobs_for_date = job_details_df[job_details_df["date_str"] == selected_date_str].copy()
         
     except Exception as e:
+        # This catches errors like the .dt accessor error
         st.error(f"Failed to read job details Excel or process data: {e}")
         return
     
