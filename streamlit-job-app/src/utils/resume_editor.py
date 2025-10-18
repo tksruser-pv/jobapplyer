@@ -132,20 +132,21 @@ def edit_resume(user_resume_path: str, job_description: str, output_path: str) -
 
 def _load_config():
     config = configparser.ConfigParser()
-    # possible_paths = [
-    #     os.path.join(os.path.dirname(os.path.abspath(__file__)), '..', 'config.ini'),
-    #     os.path.join(os.path.dirname(os.path.abspath(__file__)), '..', 'config', 'config.ini'),
-    #     os.path.join(os.getcwd(), 'config.ini'),
-    #     os.path.join(os.getcwd(), 'config', 'config.ini'),
-    # ]
-    config_path =  ['config.ini']
-    for path in config_path:  # possible_paths:
+    possible_paths = [
+        os.path.join(os.path.dirname(os.path.abspath(__file__)), '..', 'config.ini'),
+        os.path.join(os.path.dirname(os.path.abspath(__file__)), '..', 'config', 'config.ini'),
+        os.path.join(os.getcwd(), 'config.ini'),
+        os.path.join(os.getcwd(), 'config', 'config.ini'),
+    ]
+    # Search through the candidate locations and pick the first existing config file
+    config_path = None
+    for path in possible_paths:
         if os.path.exists(path):
             config_path = path
             break
 
     if not config_path or not config.read(config_path):
-        print("WARNING: config.ini not found. Using hardcoded values for resume editor.")
+        # print("WARNING: config.ini not found. Using hardcoded values for resume editor.")
         return "YOUR_GROQ_API_KEY_HERE", "llama-3.1-405b", (
             "You are a world-class career coach. Your task is to rewrite a user's resume (provided as text) to perfectly match a given job description. "
             "Focus on: 1. Highlighting relevant skills and keywords from the job description. 2. Tailoring bullet points to match the required duties. "

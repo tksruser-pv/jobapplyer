@@ -26,7 +26,7 @@ def _load_main_config():
     default_path = r"F:\TKSR PRODUCTION\job1\a1.xlsx" 
     
     if not config.read(config_paths):
-        print("WARNING: config.ini not found. Using default EXCEL_PATH.")
+        # print("WARNING: config.ini not found. Using default EXCEL_PATH.")
         return default_path
 
     try:
@@ -99,6 +99,11 @@ def main():
     user_resume = st.file_uploader("Upload your resume (PDF or DOCX)", type=["pdf", "docx"])
     user_name = st.text_input("Your Name")
     user_email = st.text_input("Your Gmail Address")
+    
+    # New Inputs for signature
+    user_phone = st.text_input("Your Phone Number")
+    user_linkedin = st.text_input("Your LinkedIn Profile URL (e.g., https://linkedin.com/in/name)")
+    
     from_password = st.text_input("Enter your Gmail App Password", type="password")
 
     # Load and clean job details
@@ -116,7 +121,6 @@ def main():
         # 2. CRITICAL FIX: Convert the 'date' column to datetime objects
         
         # Identify the date column name after standardization (to lowercase/snake_case)
-        # Check for common names like 'date', 'application_date', 'job_date'
         date_col_name = None
         for col in ['date', 'application_date', 'job_date', 'posting_date']:
             if col in job_details_df.columns:
@@ -124,33 +128,35 @@ def main():
                 break
 
         if date_col_name:
-             # Convert the found column to datetime, resolving the ".dt accessor" error
-             job_details_df['date_dt'] = pd.to_datetime(
+            # Convert the found column to datetime, resolving the ".dt accessor" error
+            job_details_df['date_dt'] = pd.to_datetime(
                 job_details_df[date_col_name],
                 errors="coerce", 
                 dayfirst=True 
             )
         else:
             st.warning("Excel file does not contain a 'date' column (e.g., 'Date', 'Application Date') for filtering.")
-            return # Stop if the necessary column is missing
+            # Do not return here, as we still want to show the app, but skip filtering later.
+            pass
         
-        # 3. Convert to a standardized string format for reliable comparison (YYYY-MM-DD)
-        # We use the new 'date_dt' column created above
-        job_details_df['date_str'] = job_details_df['date_dt'].dt.strftime('%Y-%m-%d')
-        
-        # 4. Standardize the Streamlit selected date to the same string format.
-        if hasattr(selected_date, "strftime"):
-            selected_date_str = selected_date.strftime('%Y-%m-%d')
+        if 'date_dt' in job_details_df.columns:
+            # 3. Convert to a standardized string format for reliable comparison (YYYY-MM-DD)
+            job_details_df['date_str'] = job_details_df['date_dt'].dt.strftime('%Y-%m-%d')
+            
+            # 4. Standardize the Streamlit selected date to the same string format.
+            if hasattr(selected_date, "strftime"):
+                selected_date_str = selected_date.strftime('%Y-%m-%d')
+            else:
+                st.error("Invalid date object received from calendar dropdown.")
+                return
+            
+            # Filter jobs for selected date using the standardized string column
+            jobs_for_date = job_details_df[job_details_df["date_str"] == selected_date_str].copy()
         else:
-            # Fallback if dropdown returns an unexpected object type
-            st.error("Invalid date object received from calendar dropdown.")
-            return
-        
-        # Filter jobs for selected date using the standardized string column
-        jobs_for_date = job_details_df[job_details_df["date_str"] == selected_date_str].copy()
-        
+            # If no date column found, default to an empty DataFrame for jobs_for_date
+            jobs_for_date = pd.DataFrame() 
+
     except Exception as e:
-        # This catches errors like the .dt accessor error
         st.error(f"Failed to read job details Excel or process data: {e}")
         return
     
@@ -162,12 +168,39 @@ def main():
 
     # Submit Application
     if st.button("Submit Application"):
-        # ... (Input Validations remain the same) ...
-        if not selected_date or user_resume is None or not user_name or not user_email or not from_password:
+        
+        # --- CRITICAL: REVISED INPUT VALIDATION ---
+        # The issue is likely here. We ensure every single string is non-empty.
+        validation_ok = True
+        
+        if not selected_date:
+            st.error("Missing required input: Application Date.")
+            validation_ok = False
+        if user_resume is None:
+            st.error("Missing required input: Resume Upload.")
+            validation_ok = False
+        if not user_name.strip():
+            st.error("Missing required input: Your Name.")
+            validation_ok = False
+        if not user_email.strip():
+            st.error("Missing required input: Your Gmail Address.")
+            validation_ok = False
+        if not user_phone.strip():
+            st.error("Missing required input: Your Phone Number.")
+            validation_ok = False
+        if not user_linkedin.strip():
+            st.error("Missing required input: Your LinkedIn Profile URL.")
+            validation_ok = False
+        if not from_password.strip():
+            st.error("Missing required input: Your Gmail App Password.")
+            validation_ok = False
+
+        if not validation_ok:
             st.error("Please fill in all required fields and upload your resume before submitting.")
             return
+            
         if jobs_for_date.empty:
-            st.warning(f"No companies available for the selected date ({selected_date_str}). Please choose another date.")
+            st.warning(f"No companies available for the selected date. Please choose another date.")
             return
 
         # Save uploaded resume
@@ -192,9 +225,9 @@ def main():
             recruiter_name = job_details_row.get("recruiter_name", "") 
             
             if not job_description:
-                 st.warning(f"Skipping {company_name}: Job description is missing.")
-                 fail_count += 1
-                 continue
+                st.warning(f"Skipping {company_name}: Job description is missing.")
+                fail_count += 1
+                continue
 
             # 1. Create job-specific edited resume (Output is Markdown, as per tool update)
             # The output path should be .md since the LLM editor tool outputs markdown
@@ -233,9 +266,16 @@ def main():
             # --- SEND EMAIL BLOCK ---
             try:
                 # Generate email body and subject (returns a tuple: body, subject)
-                # Note: job_details_row (Pandas Series) is passed here
                 email_content, subject = generate_email(
-                    job_details_row.to_dict(), edited_resume_path, recruiter_name, user_name, user_email
+                    job_details_row.to_dict(), 
+                    edited_resume_path, 
+                    recruiter_name, 
+                    user_name, 
+                    user_email,
+                    # --- PASSING SIGNATURE DETAILS ---
+                    user_phone,
+                    user_linkedin
+                    # ------------------------------------------
                 )
 
                 # Send email
